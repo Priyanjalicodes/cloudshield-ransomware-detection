@@ -1,205 +1,97 @@
+import json
+import os
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 
-from flask import Flask, request, render_template_string
-from datetime import datetime, timezone
+from flask import Flask, flash, redirect, render_template, request, url_for
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import desc, text
+
+from detector import detect_activity
 
 app = Flask(__name__)
-alerts = []
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "local-development-key-change-me")
 
-HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CloudShield | Ransomware Detection</title>
-<style>
-* { box-sizing: border-box; }
-body {
-    margin: 0; font-family: Arial, sans-serif;
-    background: #0b1220; color: #e5edf8;
-}
-header {
-    padding: 24px 7%; background: #111c30;
-    border-bottom: 1px solid #26364f;
-}
-header h1 { margin: 0; color: #65d6ad; }
-header p, .muted { color: #a9b9ce; }
-main { max-width: 1000px; margin: 30px auto; padding: 0 18px; }
-.card {
-    background: #142137; border: 1px solid #2b3b55;
-    padding: 22px; border-radius: 14px; margin-bottom: 20px;
-}
-form { display: grid; gap: 17px; }
-label { display: block; font-weight: bold; margin-bottom: 7px; }
-input {
-    width: 100%; padding: 12px; border-radius: 8px;
-    border: 1px solid #455873; background: #0b1220;
-    color: white; font-size: 16px;
-}
-small { display: block; color: #a9b9ce; margin-top: 6px; }
-button {
-    border: 0; border-radius: 8px; padding: 13px 18px;
-    cursor: pointer; font-weight: bold; font-size: 15px;
-    background: #65d6ad; color: #08251c;
-}
-.result { border-left: 5px solid #65d6ad; }
-.danger { border-left-color: #ff7979; }
-.warning { border-left-color: #ffc66d; }
-.score { font-size: 30px; font-weight: bold; }
-table { width: 100%; border-collapse: collapse; }
-th, td {
-    padding: 12px 8px; text-align: left;
-    border-bottom: 1px solid #2b3b55;
-}
-footer { text-align: center; padding: 24px; color: #8fa2bb; }
-@media(max-width: 600px) {
-    th, td { font-size: 12px; padding: 8px 3px; }
-}
-</style>
-</head>
-<body>
-<header>
-    <h1>🛡️ CloudShield</h1>
-    <p>Cloud-Based Ransomware Detection System</p>
-</header>
+# Render supplies DATABASE_URL. The SQLite fallback makes local testing easier.
+database_url = os.environ.get("DATABASE_URL", "sqlite:///cloudshield.db")
+# Some providers still supply postgres://; SQLAlchemy expects postgresql://.
+if database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
 
-<main>
-<section class="card">
-    <h2>Activity Analysis</h2>
-    <p class="muted">
-        Enter simulated file activity from a one-minute observation window.
-    </p>
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
 
-    <form method="post">
-        <div>
-            <label for="modified">Files modified in one minute</label>
-            <input id="modified" type="number" name="modified"
-                   min="0" max="100000" value="{{ values.modified }}"
-                   required>
-            <small>Number of files changed during the observation window.</small>
-        </div>
-
-        <div>
-            <label for="renamed">Files renamed in one minute</label>
-            <input id="renamed" type="number" name="renamed"
-                   min="0" max="100000" value="{{ values.renamed }}"
-                   required>
-            <small>Large bursts of renaming can be a warning sign.</small>
-        </div>
-
-        <div>
-            <label for="entropy">Files with unusual entropy changes (%)</label>
-            <input id="entropy" type="number" name="entropy"
-                   min="0" max="100" value="{{ values.entropy }}"
-                   required>
-            <small>Estimated percentage of files showing unusual
-            changes in data randomness.</small>
-        </div>
-
-        <button type="submit">Analyze Activity</button>
-    </form>
-</section>
-
-{% if error %}
-<section class="card warning">
-    <h3>Invalid Input</h3>
-    <p>{{ error }}</p>
-</section>
-{% endif %}
-
-{% if result %}
-<section class="card {{ 'danger' if result.level == 'HIGH'
-    else 'warning' if result.level == 'MEDIUM' else 'result' }}">
-    <h2>{{ result.status }}</h2>
-    <p class="score">{{ result.score }} / 7</p>
-    <p><b>Risk level:</b> {{ result.level }}</p>
-    <p><b>Reasoning:</b></p>
-    <ul>
-    {% for reason in result.reasons %}
-        <li>{{ reason }}</li>
-    {% endfor %}
-    </ul>
-    <p class="muted">Analyzed at {{ result.time }} UTC</p>
-</section>
-{% endif %}
-
-<section class="card">
-    <h2>Detection History</h2>
-    {% if alerts %}
-    <table>
-        <tr><th>Time (UTC)</th><th>Score</th><th>Result</th><th>Risk</th></tr>
-        {% for a in alerts %}
-        <tr>
-            <td>{{ a.time }}</td>
-            <td>{{ a.score }}/7</td>
-            <td>{{ a.status }}</td>
-            <td>{{ a.level }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% else %}
-    <p class="muted">No analyses yet.</p>
-    {% endif %}
-</section>
-
-<p class="muted">
-Educational prototype. Uses manually entered simulated metrics and
-heuristic rules. It is not a validated antivirus or a substitute for
-endpoint security software.
-</p>
-</main>
-<footer>CloudShield · Cloud Computing Semester Project</footer>
-</body>
-</html>
-"""
+db = SQLAlchemy(app)
 
 
-def detect_activity(modified, renamed, entropy):
-    score = 0
-    reasons = []
+class Scan(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    modified = db.Column(db.Integer, nullable=False)
+    renamed = db.Column(db.Integer, nullable=False)
+    entropy = db.Column(db.Integer, nullable=False)
+    score = db.Column(db.Integer, nullable=False)
+    level = db.Column(db.String(10), nullable=False, index=True)
+    status = db.Column(db.String(80), nullable=False)
+    reasons = db.Column(db.JSON, nullable=False)
+    baseline_used = db.Column(db.Boolean, nullable=False, default=False)
 
-    if modified >= 30:
-        score += 2
-        reasons.append("Very high file modification volume (+2).")
-    elif modified >= 15:
-        score += 1
-        reasons.append("Elevated file modification volume (+1).")
-    else:
-        reasons.append("File modification volume is below the elevated threshold.")
 
-    if renamed >= 10:
-        score += 2
-        reasons.append("Very high file renaming volume (+2).")
-    elif renamed >= 5:
-        score += 1
-        reasons.append("Elevated file renaming volume (+1).")
-    else:
-        reasons.append("File renaming volume is below the elevated threshold.")
+def get_baseline():
+    """Build a baseline from up to 30 previous LOW-risk scans only."""
+    rows = (
+        Scan.query.filter_by(level="LOW")
+        .order_by(desc(Scan.created_at))
+        .limit(30)
+        .all()
+    )
+    if len(rows) < 5:
+        return None
 
-    if entropy >= 50:
-        score += 3
-        reasons.append("Many files show unusual entropy changes (+3).")
-    elif entropy >= 25:
-        score += 2
-        reasons.append("Some files show unusual entropy changes (+2).")
-    else:
-        reasons.append("Unusual entropy changes are below the alert threshold.")
+    # The detector uses averages of previous low-risk activity.
+    return {
+        "count": len(rows),
+        "modified": sum(row.modified for row in rows) / len(rows),
+        "renamed": sum(row.renamed for row in rows) / len(rows),
+        "entropy": sum(row.entropy for row in rows) / len(rows),
+    }
 
-    if score >= 5:
-        level = "HIGH"
-        status = "Suspicious Activity Detected"
-    elif score >= 3:
-        level = "MEDIUM"
-        status = "Potentially Suspicious Activity"
-    else:
-        level = "LOW"
-        status = "Normal-Looking Activity"
+
+def make_dashboard_data():
+    total_scans = Scan.query.count()
+    high_count = Scan.query.filter_by(level="HIGH").count()
+    medium_count = Scan.query.filter_by(level="MEDIUM").count()
+    low_count = Scan.query.filter_by(level="LOW").count()
+
+    recent = Scan.query.order_by(desc(Scan.created_at)).limit(8).all()
+    chart_rows = Scan.query.order_by(desc(Scan.created_at)).limit(100).all()
+    chart_rows.reverse()
+
+    # Group scan counts by UTC calendar date for the most recent seven days.
+    today = datetime.now(timezone.utc).date()
+    dates = [today - timedelta(days=offset) for offset in range(6, -1, -1)]
+    counts_by_date = Counter()
+    for row in chart_rows:
+        stamp = row.created_at
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        counts_by_date[stamp.astimezone(timezone.utc).date()] += 1
+
+    trend_labels = [day.strftime("%d %b") for day in dates]
+    trend_values = [counts_by_date[day] for day in dates]
 
     return {
-        "score": score,
-        "level": level,
-        "status": status,
-        "reasons": reasons,
-        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        "total_scans": total_scans,
+        "high_count": high_count,
+        "medium_count": medium_count,
+        "low_count": low_count,
+        "recent": recent,
+        "risk_labels": ["High", "Medium", "Low"],
+        "risk_values": [high_count, medium_count, low_count],
+        "trend_labels": trend_labels,
+        "trend_values": trend_values,
+        "baseline": get_baseline(),
     }
 
 
@@ -215,33 +107,75 @@ def dashboard():
             renamed = int(request.form.get("renamed", ""))
             entropy = int(request.form.get("entropy", ""))
 
-            if not (0 <= modified <= 100000):
-                raise ValueError("Modified files must be between 0 and 100000.")
-            if not (0 <= renamed <= 100000):
-                raise ValueError("Renamed files must be between 0 and 100000.")
-            if not (0 <= entropy <= 100):
+            if not 0 <= modified <= 100000:
+                raise ValueError("Files modified must be between 0 and 100000.")
+            if not 0 <= renamed <= 100000:
+                raise ValueError("Files renamed must be between 0 and 100000.")
+            if not 0 <= entropy <= 100:
                 raise ValueError("Entropy percentage must be between 0 and 100.")
 
             values = {
                 "modified": str(modified),
                 "renamed": str(renamed),
-                "entropy": str(entropy)
+                "entropy": str(entropy),
             }
 
-            result = detect_activity(modified, renamed, entropy)
-            alerts.insert(0, {
-                **result,
-                "scenario": "Custom activity"
-            })
-            del alerts[50:]
+            baseline = get_baseline()
+            result = detect_activity(modified, renamed, entropy, baseline)
 
-        except (ValueError, TypeError):
-            error = "Enter valid whole numbers within the specified ranges."
+            scan = Scan(
+                modified=modified,
+                renamed=renamed,
+                entropy=entropy,
+                score=result["score"],
+                level=result["level"],
+                status=result["status"],
+                reasons=result["reasons"],
+                baseline_used=result["baseline_used"],
+            )
+            db.session.add(scan)
+            db.session.commit()
+            flash("Analysis saved to the database.", "success")
 
-    return render_template_string(
-        HTML, result=result, alerts=alerts, values=values, error=error
+        except ValueError as exc:
+            error = str(exc) if str(exc) else "Enter valid whole numbers."
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("Could not save the scan")
+            error = "The scan could not be saved. Check the database connection and Render logs."
+
+    data = make_dashboard_data()
+    return render_template(
+        "index.html",
+        result=result,
+        error=error,
+        values=values,
+        data=data,
     )
 
 
+@app.route("/history")
+def history():
+    scans = Scan.query.order_by(desc(Scan.created_at)).limit(200).all()
+    return render_template("history.html", scans=scans)
+
+
+@app.route("/health")
+def health():
+    # Simple deployment health check. It also verifies that the database responds.
+    try:
+        db.session.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "connected"}, 200
+    except Exception:
+        app.logger.exception("Health check database query failed")
+        return {"status": "error", "database": "unavailable"}, 503
+
+
+# Create the initial table automatically. For a larger production system,
+# use Flask-Migrate/Alembic to manage schema changes.
+with app.app_context():
+    db.create_all()
+
+
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
