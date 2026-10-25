@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CloudShield | Detection History</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon">🛡️</span><span><strong>CloudShield</strong><small>RANSOMWARE DEFENSE</small></span></a>
+    <div class="nav-label">WORKSPACE</div>
+    <a class="nav-link" href="{{ url_for('dashboard') }}">▦ <span>Overview</span></a>
+    <a class="nav-link active" href="{{ url_for('history') }}">◷ <span>Detection history</span></a>
+    <div class="sidebar-bottom"><span class="status-dot"></span><span><strong>Cloud service</strong><small>Dashboard online</small></span></div>
+  </aside>
+  <main class="main-content">
+    <header class="topbar">
+      <div><p class="eyebrow">SECURITY CENTER / HISTORY</p><h1>Detection history</h1><p class="subheading">The latest 200 analyses saved in your database.</p></div>
+      <a class="secondary-button" href="{{ url_for('dashboard') }}">← Back to dashboard</a>
+    </header>
+    <section class="panel history-panel">
+      {% if scans %}
+      <div class="table-scroll"><table>
+        <thead><tr><th>TIME (UTC)</th><th>MODIFIED</th><th>RENAMED</th><th>ENTROPY</th><th>SCORE</th><th>RESULT</th><th>RISK</th></tr></thead>
+        <tbody>
+        {% for scan in scans %}
+        <tr>
+          <td>{{ scan.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+          <td>{{ scan.modified }}</td><td>{{ scan.renamed }}</td><td>{{ scan.entropy }}%</td>
+          <td><strong>{{ scan.score }}/10</strong></td><td>{{ scan.status }}</td>
+          <td><span class="risk-badge {{ scan.level|lower }}">{{ scan.level }}</span></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      {% else %}
+      <div class="table-empty">No scans yet. Go to the dashboard and analyze activity.</div>
+      {% endif %}
+    </section>
+    <footer class="footer-note"><span>🛡 CloudShield · Cloud Computing Semester Project</span><span>Educational prototype</span></footer>
+  </main>
+</div>
+</body>
+</html>
